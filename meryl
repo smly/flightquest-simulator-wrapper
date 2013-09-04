@@ -1,0 +1,94 @@
+#!/usr/bin/env ruby
+# -*- coding: utf-8 -*-
+require 'webrick'
+require 'logger'
+
+# Requirements:
+#   * ruby >= 2
+#   * mono
+#   * FlightQuest Simulator
+
+# Usage:
+#   $ curl "localhost:3000/api?oneDaySampleSubmission.csv"
+
+RUN_SIMULATOR_CMD = "/usr/bin/mono /opt/GEFlight2/Rev3/FlightQuestSimulatorExecutable/RunSimulation.exe"
+SUBMISSION_DIRNAME = "/opt/GEFlight2/Rev2/OneDaySimulatorFiles"
+
+
+module Meryl
+  class SimulatorRunner
+    def initialize(cmd)
+      @cmd = cmd
+      @pid = nil
+      @reader = nil
+      @writer = nil
+      @log = Logger.new(STDOUT)
+    end
+
+    def spawn
+      out_r, out_w = IO.pipe
+      in_r, in_w = IO.pipe
+
+      @writer = in_w
+      @reader = out_r
+      @pid = Process.spawn(@cmd, :in => in_r, :out => out_w)
+    end
+
+    def prepare
+      while ret = @reader.readline
+        @log.info("RunSimulation: #{ret.rstrip}")
+        break if ret =~ /Enter routes file name from/
+      end
+    end
+
+    def run(filename)
+      @writer.puts filename
+      @writer.flush
+
+      output = []
+      while ret = @reader.readline
+        @log.info("RunSimulation: #{ret.rstrip}")
+        break if ret =~ /Enter routes file name from/
+        output << ret
+      end
+
+      output.join("").rstrip
+    end
+
+    def shutdown
+      @log.info("RunSimulation: going to shutdown")
+      @writer.close
+      @reader.close
+      Process.waitpid(@pid)
+      @log.info("RunSimulation: done")
+    end
+  end
+
+  def self.start(cmd, dirname)
+    wrapper = SimulatorRunner.new(cmd)
+    wrapper.spawn
+    wrapper.prepare
+
+    server = WEBrick::HTTPServer.new(
+      :Port => 3000,
+      :BindAddress => '0.0.0.0',
+    )
+
+    server.mount_proc '/api' do |req, res|
+      res.content_type = "text/plain"
+      if File.exist?("#{dirname}/#{req.query_string}")
+        res.body = wrapper.run(req.query_string)
+      else
+        res.body = "requested file not found"
+      end
+    end
+
+    trap 'INT' do
+      server.shutdown
+      wrapper.shutdown
+    end
+    server.start
+  end
+end
+
+Meryl.start(RUN_SIMULATOR_CMD, SUBMISSION_DIRNAME)
